@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Circus Charlie - Authentic Recreation</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #000;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            overflow: hidden;
+            font-family: 'Courier New', Courier, monospace;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        #game-container {
+            position: relative;
+            width: 100%;
+            max-width: 800px;
+            /* 実際のファミコン解像度 (256x240) のアスペクト比 */
+            aspect-ratio: 256 / 240;
+            background-color: #000;
+            overflow: hidden;
+            box-shadow: 0 0 20px rgba(255, 255, 255, 0.1);
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            /* ドットをくっきりと表示する */
+            image-rendering: pixelated; 
+            image-rendering: crisp-edges;
+        }
+
+        #start-screen {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background-color: rgba(0, 0, 0, 0.85);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 20;
+            text-align: center;
+            color: #fff;
+        }
+
+        #start-screen h1 {
+            color: #D82800; /* NES Red */
+            font-size: 6vw;
+            margin-bottom: 5px;
+            text-shadow: 2px 2px 0px #fff;
+            letter-spacing: 2px;
+        }
+        @media (min-width: 768px) { #start-screen h1 { font-size: 40px; } }
+
+        .blink {
+            animation: blinker 0.5s step-end infinite;
+            color: #F8B800; /* NES Yellow */
+            margin-top: 20px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        @keyframes blinker { 50% { opacity: 0; } }
+
+        #controls {
+            position: absolute;
+            bottom: 2%;
+            width: 100%;
+            display: flex;
+            justify-content: space-between;
+            padding: 0 10px;
+            box-sizing: border-box;
+            z-index: 15;
+            opacity: 0.3;
+        }
+        .d-pad, .action-btns { display: flex; gap: 10px; }
+        .btn {
+            width: 50px; height: 50px;
+            background-color: #fff;
+            border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            font-weight: bold; font-size: 20px; color: #000;
+        }
+        .btn:active { background-color: #888; }
+        
+        @media (min-width: 768px) { #controls { display: none; } }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <canvas id="gameCanvas" width="256" height="240"></canvas>
+    
+    <div id="start-screen">
+        <h1>CIRCUS CHARLIE</h1>
+        <p class="blink" id="start-btn">PUSH START BUTTON</p>
+        <p style="color:#aaa; font-size: 10px; margin-top: 30px;">
+            KEYBOARD: [Left/Right] Move, [Z] Jump<br>
+            GAMEPAD: D-Pad/Stick Move, A/B Jump
+        </p>
+    </div>
+    
+    <div id="controls">
+        <div class="d-pad">
+            <div class="btn" id="btn-left">◀</div>
+            <div class="btn" id="btn-right">▶</div>
+        </div>
+        <div class="action-btns">
+            <div class="btn" id="btn-z">JUMP</div>
+        </div>
+    </div>
+</div>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    // ファミコンのカラーパレットに近い色定義
+    const PAL = {
+        0: null, 
+        1: '#000000', // Black
+        2: '#FFFFFF', // White
+        3: '#D82800', // Red (服、テント等)
+        4: '#FCA044', // Skin (顔)
+        5: '#0058F8', // Blue (ズボン)
+        6: '#887000', // Brown (ライオンのたてがみ等)
+        7: '#FC9838', // Light Brown/Orange (ライオンの体)
+        8: '#F8B800', // Yellow (星、炎)
+        9: '#00A800', // Green (地面)
+        A: '#005000', // Dark Green (地面の線)
+        B: '#6844FC', // Purple (火の輪の飾り)
+        C: '#F878F8'  // Pink (UIテキスト)
+    };
+
+    const W = 256;  
+    const H = 240; 
+    
+    let gameState = 'START'; 
+    let score = 0;
+    let hiScore = 20000;
+    let bonus = 5000;
+    let bonusTimer = 0;
+    let cameraX = 0;
+    let lives = 3;
+    const GOAL_DISTANCE = 3500;
+
+    const keys = { ArrowLeft: false, ArrowRight: false, z: false };
+
+    /* =========================================================================
+       スプライトデータ (1文字 = 1ピクセル)
+       画像に忠実に、右向き(横顔)で作成
+       ========================================================================= */
+    const SPRITES = {
+        // チャーリー (右向き) 16x16
+        CHARLIE: [
+            "0000000000000000",
+            "0000033333300000",
+            "0000033333333000",
+            "0000011444444000",
+            "0000144414444000",
+            "0000044444344000",
+            "0000004444400000",
+            "0000003333000000",
+            "0000033333300000",
+            "0000333333330000",
+            "0000223333332200",
+            "0000555555550000",
+            "0000055005500000",
+            "0000055005500000",
+            "0000033003300000",
+            "0000000000000000"
+        ],
+        // ライオン 走り1 (右向き) 32x16
+        LION_RUN1: [
+            "00000000000000000000000000000000",
+            "00000000000000000006660000000000",
+            "00000000000000000666666000000000",
+            "00000000000000006666666660000000",
+            "00000000000000006666166660000000",
+            "00000000000000006666666266000000",
+            "00000000000000006666666226000000",
+            "00000776666666666666666226000000",
+            "00077767777777777776662226600000",
+            "00077677777777777777662226600000",
+            "00776777777777777777766226000000",
+            "00776777777777777777766260000000",
+            "00767766660000666600076600000000",
+            "00667600000000000760000000000000",
+            "00066000000000000660000000000000",
+            "00011000000000000110000000000000"
+        ],
+        // ライオン 走り2 (右向き 足を伸ばす) 32x16
+        LION_RUN2: [
+            "00000000000000000000000000000000",
+            "00000000000000000006660000000000",
+            "00000000000000000666666000000000",
+            "00000000000000006666666660000000",
+            "00000000000000006666166660000000",
+            "00000000000000006666666266000000",
+            "00000000000000006666666226000000",
+            "00000776666666666666666226000000",
+            "00077767777777777776662226600000",
+            "00077677777777777777662226600000",
+            "00776777777777777777766226000000",
+            "00776777777777777777766260000000",
+            "00076776666000006666000766000000",
+            "00066760000000000007600000000000",
+            "00006600000000000006600000000000",
+            "00001100000000000001100000000000"
+        ],
+        // 火鉢 (壺) 16x16
+        POT: [
+            "0000003883000000",
+            "0000033883300000",
+            "0000088888800000",
+            "0000003883000000",
+            "0000022222200000",
+            "0000222222220000",
+            "0002212222122000",
+            "0002211221122000",
+            "0000221111220000",
+            "0000022222200000",
+            "0000002222000000",
+            "0000000000000000",
+            "0000000000000000",
+            "0000000000000000",
+            "0000000000000000",
+            "0000000000000000"
+        ],
+        // 残機用チャーリー顔 8x8
+        FACE: [
+            "03333300",
+            "03333330",
+            "11444440",
+            "14414440",
+            "04444340",
+            "00444400",
+            "00000000",
+            "00000000"
+        ]
+    };
+
+    // 火の輪のスプライト生成 (奥側・手前側)
+    // 縦に長く、画像に忠実な縄のような燃える輪
+    SPRITES.RING_BACK = [];
+    SPRITES.RING_FRONT = [];
+    const RING_HEIGHT = 80;
+    const RING_WIDTH = 24;
+    for(let i=0; i<RING_HEIGHT; i++) {
+        let rb = new Array(RING_WIDTH).fill('0');
+        let rf = new Array(RING_WIDTH).fill('0');
+        
+        let dy = i - RING_HEIGHT/2;
+        // 楕円の方程式
+        let x = (RING_WIDTH/2 - 4) * Math.sqrt(Math.max(0, 1 - (dy*dy)/((RING_HEIGHT/2)*(RING_HEIGHT/2))));
+        let xInt = Math.floor(x);
+        
+        // 上部の紫の飾り
+        if (i < 8 && xInt < 4) {
+            rb[RING_WIDTH/2 - 2] = 'B'; rb[RING_WIDTH/2 - 1] = 'B';
+            rf[RING_WIDTH/2] = 'B'; rf[RING_WIDTH/2 + 1] = 'B';
+        } else {
+            // 左側 (奥)
+            let lx = RING_WIDTH/2 - xInt - 3;
+            if(lx >= 0 && lx < RING_WIDTH) {
+                rb[lx] = '3'; rb[lx+1] = '8'; rb[lx+2] = (Math.random()>0.5?'3':'8');
+            }
+            // 右側 (手前)
+            let rx = RING_WIDTH/2 + xInt;
+            if(rx >= 0 && rx < RING_WIDTH-2) {
+                rf[rx] = '3'; rf[rx+1] = '8'; rf[rx+2] = (Math.random()>0.5?'3':'8');
+            }
+        }
+        SPRITES.RING_BACK.push(rb.join(''));
+        SPRITES.RING_FRONT.push(rf.join(''));
+    }
+
+    function drawSprite(spriteData, x, y) {
+        for (let r = 0; r < spriteData.length; r++) {
+            for (let c = 0; c < spriteData[0].length; c++) {
+                let colorCode = spriteData[r][c];
+                if (PAL[colorCode]) {
+                    ctx.fillStyle = PAL[colorCode];
+                    // 1ピクセル単位で描画 (スケール1倍)
+                    ctx.fillRect(Math.floor(x + c), Math.floor(y + r), 1, 1);
+                }
+            }
+        }
+    }
+
+    /* =========================================================================
+       オーディオシステム
+       ========================================================================= */
+    let audioCtx = null;
+    let bgmInterval = null;
+
+    function initAudio() {
+        if (audioCtx) return;
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        audioCtx = new AudioContext();
+    }
+
+    function playSE(type) {
+        if (!audioCtx) return;
+        const t = audioCtx.currentTime;
+        
+        if (type === 'jump') {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(300, t);
+            osc.frequency.linearRampToValueAtTime(500, t + 0.2);
+            gain.gain.setValueAtTime(0.05, t);
+            gain.gain.linearRampToValueAtTime(0, t + 0.2);
+            osc.connect(gain); gain.connect(audioCtx.destination);
+            osc.start(t); osc.stop(t + 0.2);
+        } else if (type === 'score') {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(880, t);
+            osc.frequency.setValueAtTime(1108, t + 0.05);
+            gain.gain.setValueAtTime(0.05, t);
+            gain.gain.setTargetAtTime(0, t, 0.1);
+            osc.connect(gain); gain.connect(audioCtx.destination);
+            osc.start(t); osc.stop(t + 0.2);
+        } else if (type === 'die') {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(600, t);
+            for(let i=0; i<15; i++) {
+                osc.frequency.setValueAtTime(600 - i*30, t + i*0.05);
+            }
+            gain.gain.setValueAtTime(0.1, t);
+            gain.gain.linearRampToValueAtTime(0, t + 0.7);
+            osc.connect(gain); gain.connect(audioCtx.destination);
+            osc.start(t); osc.stop(t + 0.7);
+        }
+    }
+
+    function getFreq(n) {
+        if(n==="-") return 0;
+        const notes = {'C':-9, 'C#':-8, 'D':-7, 'D#':-6, 'E':-5, 'F':-4, 'F#':-3, 'G':-2, 'G#':-1, 'A':0, 'A#':1, 'B':2};
+        return 440 * Math.pow(2, (notes[n.match(/[A-G]#?/)[0]] + (parseInt(n.match(/\d/)[0]) - 4) * 12) / 12);
+    }
+
+    function startBGM() {
+        if (!audioCtx || bgmInterval) return;
+        const melody = [
+            "C5","-","E5","-", "G5","-","C6","-", "G5","-","E5","-", "C5","-","C5","-",
+            "D5","-","F5","-", "A5","-","D6","-", "A5","-","F5","-", "D5","-","G4","-"
+        ];
+        const bass = [
+            "C3","-","G3","-", "C3","-","G3","-", "C3","-","G3","-", "C3","-","G3","-",
+            "D3","-","A3","-", "D3","-","A3","-", "D3","-","A3","-", "D3","-","G3","-"
+        ];
+        let step = 0;
+        bgmInterval = setInterval(() => {
+            if(gameState !== 'PLAY') return;
+            const t = audioCtx.currentTime;
+            let mNote = melody[step % melody.length];
+            if (mNote !== "-") {
+                let oscM = audioCtx.createOscillator(); let gainM = audioCtx.createGain();
+                oscM.type = 'square'; oscM.frequency.value = getFreq(mNote);
+                oscM.connect(gainM); gainM.connect(audioCtx.destination);
+                gainM.gain.setValueAtTime(0.03, t); gainM.gain.setTargetAtTime(0, t, 0.05); 
+                oscM.start(t); oscM.stop(t + 0.1);
+            }
+            let bNote = bass[step % bass.length];
+            if (bNote !== "-") {
+                let oscB = audioCtx.createOscillator(); let gainB = audioCtx.createGain();
+                oscB.type = 'triangle'; oscB.frequency.value = getFreq(bNote);
+                oscB.connect(gainB); gainB.connect(audioCtx.destination);
+                gainB.gain.setValueAtTime(0.05, t); gainB.gain.setTargetAtTime(0, t, 0.08);
+                oscB.start(t); oscB.stop(t + 0.15);
+            }
+            step++;
+        }, 110);
+    }
+    function stopBGM() { if(bgmInterval) { clearInterval(bgmInterval); bgmInterval = null; } }
+
+
+    /* =========================================================================
+       ゲームロジック・物理演算
+       ========================================================================= */
+    const player = {
+        x: 50, y: 170, // 接地Y座標 (ライオンの足元)
+        vx: 0, vy: 0,
+        accel: 0.15,
+        maxSpeed: 1.5,
+        friction: 0.85,
+        jumpPower: -4.5, // 画面サイズに合わせたジャンプ力
+        gravity: 0.18,
+        grounded: true,
+        animTimer: 0,
+        // 当たり判定 (中心から。ライオンとチャーリーを含む)
+        hitbox: { ox: 8, oy: -18, w: 16, h: 18 } 
+    };
+
+    let obstacles = [];
+
+    function generateMap() {
+        obstacles = [];
+        let curX = 300;
+        while(curX < GOAL_DISTANCE) {
+            let r = Math.random();
+            if (r < 0.3) {
+                // 火鉢のみ
+                obstacles.push({ type: 'pot', x: curX, y: 170, w: 16, h: 16, passed: false });
+                curX += 120 + Math.random() * 50;
+            } else if (r < 0.6) {
+                // 火鉢 ＋ 固定の火の輪
+                obstacles.push({ type: 'pot', x: curX, y: 170, w: 16, h: 16, passed: false });
+                obstacles.push({ type: 'ring', x: curX, y: 160, w: 24, h: 80, vx: 0, passed: false });
+                curX += 150 + Math.random() * 50;
+            } else {
+                // 向かってくる火の輪 (これが一番面白い部分)
+                // 奥から左へ移動してくる
+                obstacles.push({ type: 'ring', x: curX + 100, y: 160, w: 24, h: 80, vx: -0.8, passed: false });
+                curX += 200 + Math.random() * 80;
+            }
+        }
+    }
+
+    // Gamepad API 処理
+    function getGamepadInput() {
+        const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+        for (let i = 0; i < gamepads.length; i++) {
+            const gp = gamepads[i];
+            if (gp) {
+                // 左スティックまたは十字キー
+                keys.ArrowLeft = gp.axes[0] < -0.5 || gp.buttons[14]?.pressed;
+                keys.ArrowRight = gp.axes[0] > 0.5 || gp.buttons[15]?.pressed;
+                // A or B button
+                keys.z = gp.buttons[0]?.pressed || gp.buttons[1]?.pressed || gp.buttons[2]?.pressed;
+            }
+        }
+    }
+
+    function updateGame() {
+        getGamepadInput(); // コントローラー入力を取得
+
+        if (gameState !== 'PLAY') return;
+
+        if(bonusTimer++ > 60) {
+            bonusTimer = 0;
+            if(bonus > 0) bonus -= 10;
+        }
+
+        // --- 物理挙動 ---
+        if (keys.ArrowRight) {
+            player.vx += player.grounded ? player.accel : player.accel * 0.5;
+        } else if (keys.ArrowLeft) {
+            player.vx -= player.grounded ? player.accel : player.accel * 0.5;
+        } else if (player.grounded) {
+            player.vx *= player.friction;
+        }
+
+        if (player.vx > player.maxSpeed) player.vx = player.maxSpeed;
+        if (player.vx < -player.maxSpeed) player.vx = -player.maxSpeed;
+
+        player.animTimer += Math.abs(player.vx);
+
+        if (keys.z && player.grounded) {
+            player.vy = player.jumpPower;
+            player.grounded = false;
+            playSE('jump');
+            keys.z = false; 
+        }
+
+        player.vy += player.gravity;
+        player.x += player.vx;
+        player.y += player.vy;
+
+        if (player.y >= 170) {
+            player.y = 170;
+            player.vy = 0;
+            player.grounded = true;
+        }
+        if (player.x < 10) { player.x = 10; player.vx = 0; }
+        
+        let targetCamX = player.x - 60;
+        if (targetCamX > cameraX) cameraX += (targetCamX - cameraX) * 0.1;
+        if (cameraX > GOAL_DISTANCE - W + 120) cameraX = GOAL_DISTANCE - W + 120;
+
+        // --- 障害物の移動と当たり判定 ---
+        let px = player.x + player.hitbox.ox;
+        let py = player.y + player.hitbox.oy;
+        let pw = player.hitbox.w;
+        let ph = player.hitbox.h;
+
+        obstacles.forEach(obs => {
+            // 火の輪の移動
+            if (obs.type === 'ring' && obs.vx) {
+                obs.x += obs.vx;
+            }
+
+            // スコア加算
+            if (!obs.passed && player.x > obs.x + obs.w/2) {
+                obs.passed = true;
+                score += (obs.type === 'ring' ? 200 : 100);
+                playSE('score');
+            }
+
+            // 衝突判定 (厳密化)
+            if (obs.type === 'pot') {
+                if (px < obs.x + obs.w - 4 && px + pw > obs.x + 4 && py + ph > obs.y - 12) {
+                    die();
+                }
+            } else if (obs.type === 'ring') {
+                // リングのX軸に重なっているか
+                if (px + pw > obs.x + 8 && px < obs.x + obs.w - 8) {
+                    // 安全地帯: ringTopY + 16(上部炎の厚み) から ringBottomY - 10(下部炎の厚み) の間
+                    let ringTopY = obs.y - obs.h;
+                    let ringBottomY = obs.y;
+                    
+                    if (py < ringTopY + 16 || py + ph > ringBottomY - 10) {
+                        die();
+                    }
+                }
+            }
+        });
+    }
+
+    function die() {
+        if(gameState === 'GAME_OVER') return;
+        gameState = 'GAME_OVER';
+        stopBGM();
+        playSE('die');
+        player.vy = -3; 
+        player.vx = 0;
+    }
+
+    /* =========================================================================
+       描画
+       ========================================================================= */
+    function drawBackground() {
+        ctx.fillStyle = PAL['1'];
+        ctx.fillRect(0, 0, W, H);
+        
+        // --- テント柄 ---
+        let tentOffset = Math.floor(cameraX * 0.2) % 32;
+        for (let i = -32; i < W + 32; i += 16) {
+            let dx = i - tentOffset;
+            // 茶色と黄色の格子
+            ctx.fillStyle = PAL['6']; // Brown
+            ctx.fillRect(dx, 32, 16, 24);
+            ctx.fillStyle = PAL['8']; // Yellow
+            if((i/16)%2===0) {
+                ctx.fillRect(dx, 32, 8, 12); ctx.fillRect(dx+8, 44, 8, 12);
+            } else {
+                ctx.fillRect(dx+8, 32, 8, 12); ctx.fillRect(dx, 44, 8, 12);
+            }
+        }
+
+        // --- アーチ (白と赤、青の装飾) ---
+        let archOffset = Math.floor(cameraX * 0.5) % 32;
+        for (let i = -32; i < W + 32; i += 32) {
+            let dx = i - archOffset;
+            ctx.fillStyle = PAL['2']; // White
+            ctx.fillRect(dx, 64, 32, 16);
+            ctx.beginPath(); ctx.arc(dx+16, 64, 16, Math.PI, 0); ctx.fill();
+            
+            // 赤と青の模様
+            ctx.fillStyle = PAL['3']; // Red
+            ctx.beginPath(); ctx.moveTo(dx, 64); ctx.lineTo(dx+8, 72); ctx.lineTo(dx+16, 64); ctx.fill();
+            ctx.fillStyle = PAL['5']; // Blue
+            ctx.beginPath(); ctx.moveTo(dx+16, 64); ctx.lineTo(dx+24, 72); ctx.lineTo(dx+32, 64); ctx.fill();
+        }
+
+        // --- 地面 (緑 + 暗い緑の横線) ---
+        ctx.fillStyle = PAL['9']; // Green
+        ctx.fillRect(0, 80, W, 120);
+        ctx.fillStyle = PAL['A']; // Dark Green
+        [90, 105, 125, 150, 180, 195].forEach(y => {
+            ctx.fillRect(0, y, W, 1);
+        });
+
+        // --- 距離メーター (赤枠) ---
+        let meterOffset = Math.floor(cameraX) % 150;
+        let startMeter = Math.floor(cameraX / 150);
+        ctx.font = 'bold 10px "Courier New"';
+        for(let i=0; i<4; i++) {
+            let dx = (i * 150) - meterOffset;
+            let mVal = Math.max(0, Math.floor((GOAL_DISTANCE - (startMeter + i)*150) / 10));
+            
+            // 赤枠
+            ctx.fillStyle = PAL['3']; ctx.fillRect(dx + 10, 205, 40, 16);
+            ctx.fillStyle = PAL['1']; ctx.fillRect(dx + 12, 207, 36, 12);
+            ctx.fillStyle = PAL['2']; ctx.fillText(mVal + "M", dx + 16, 216);
+        }
+    }
+
+    function renderGame() {
+        ctx.clearRect(0, 0, W, H);
+        drawBackground();
+
+        // 障害物 (奥側: 輪の後ろ部分)
+        obstacles.forEach(obs => {
+            if(obs.type === 'ring' && obs.x > cameraX - 50 && obs.x < cameraX + W) {
+                drawSprite(SPRITES.RING_BACK, obs.x - cameraX, obs.y - obs.h);
+            }
+        });
+
+        // プレイヤー
+        if(gameState === 'GAME_OVER') {
+            player.y += player.vy; player.vy += 0.2; 
+        }
+
+        let pDrawX = player.x - cameraX;
+        let pDrawY = player.y; 
+
+        // ライオン
+        let lSprite = SPRITES.LION_RUN1;
+        if(player.grounded && Math.abs(player.vx) > 0.1) {
+            lSprite = Math.floor(player.animTimer / 5) % 2 === 0 ? SPRITES.LION_RUN1 : SPRITES.LION_RUN2;
+        }
+        drawSprite(lSprite, pDrawX, pDrawY - 16);
+
+        // チャーリー
+        let cSprite = SPRITES.CHARLIE; 
+        let charlieY = pDrawY - 26; 
+        if(player.grounded && Math.abs(player.vx) > 0.1 && Math.floor(player.animTimer/5)%2===0) {
+            charlieY += 1; 
+        }
+        drawSprite(cSprite, pDrawX + 8, charlieY);
+
+        // 障害物 (手前側: 輪の前部分、壺)
+        obstacles.forEach(obs => {
+            if(obs.x > cameraX - 50 && obs.x < cameraX + W) {
+                let dx = obs.x - cameraX;
+                if(obs.type === 'ring') drawSprite(SPRITES.RING_FRONT, dx, obs.y - obs.h);
+                else if (obs.type === 'pot') drawSprite(SPRITES.POT, dx, obs.y - obs.h);
+            }
+        });
+
+        // --- UI (黒帯とテキスト) ---
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, W, 32);
+        
+        ctx.fillStyle = PAL['2'];
+        ctx.font = 'bold 10px "Courier New"';
+        ctx.textBaseline = 'top';
+        
+        // 上段
+        let scoreStr = score.toString().padStart(6, '0');
+        let hiScoreStr = hiScore.toString().padStart(6, '0');
+        ctx.fillText(`${scoreStr} HI-${hiScoreStr} STAGE-01`, 20, 4);
+        
+        // 下段 (BONUS と残機)
+        ctx.fillStyle = PAL['C']; // Pink
+        ctx.fillText(`BONUS-${bonus.toString().padStart(4, '0')}`, 70, 16);
+        
+        // 残機アイコン
+        for(let i=0; i<lives; i++) {
+            drawSprite(SPRITES.FACE, 180 + (i * 10), 14);
+        }
+
+        // メッセージ
+        if (gameState === 'GAME_OVER') {
+            ctx.fillStyle = PAL['3'];
+            ctx.font = 'bold 20px "Courier New"';
+            ctx.fillText("MISS", W/2 - 20, H/2 - 10);
+        }
+    }
+
+    function loop() {
+        updateGame();
+        renderGame();
+        requestAnimationFrame(loop);
+    }
+
+    /* =========================================================================
+       入力と初期化
+       ========================================================================= */
+    window.addEventListener('keydown', e => {
+        if (keys.hasOwnProperty(e.key)) keys[e.key] = true;
+        if (gameState === 'START' && e.key === 'z') startGame();
+        else if (gameState === 'GAME_OVER' && e.key === 'z') {
+            lives--;
+            if(lives < 0) { lives = 3; score = 0; }
+            resetGame();
+        }
+    });
+    window.addEventListener('keyup', e => {
+        if (keys.hasOwnProperty(e.key)) keys[e.key] = false;
+    });
+
+    function bindTouch(id, key) {
+        const el = document.getElementById(id);
+        if(!el) return;
+        el.addEventListener('touchstart', (e) => {
+            e.preventDefault(); keys[key] = true;
+            if (gameState === 'START') startGame();
+            else if (gameState === 'GAME_OVER' && key === 'z') {
+                lives--; if(lives < 0) { lives = 3; score = 0; }
+                resetGame();
+            }
+        }, {passive: false});
+        el.addEventListener('touchend', (e) => {
+            e.preventDefault(); keys[key] = false;
+        }, {passive: false});
+    }
+    bindTouch('btn-left', 'ArrowLeft'); bindTouch('btn-right', 'ArrowRight'); bindTouch('btn-z', 'z'); 
+
+    document.getElementById('start-btn').addEventListener('click', startGame);
+
+    function startGame() {
+        if (gameState === 'PLAY') return;
+        initAudio(); startBGM();
+        document.getElementById('start-screen').style.display = 'none';
+        resetGame(true);
+    }
+
+    function resetGame(fullReset = false) {
+        if (fullReset) { score = 0; lives = 3; }
+        player.x = 50; player.y = 170; player.vx = 0; player.vy = 0; player.grounded = true;
+        bonus = 5000; bonusTimer = 0; cameraX = 0;
+        generateMap();
+        gameState = 'PLAY';
+        startBGM();
+    }
+
+    // 初回描画
+    renderGame();
+    requestAnimationFrame(loop);
+
+</script>
+</body>
+</html>
